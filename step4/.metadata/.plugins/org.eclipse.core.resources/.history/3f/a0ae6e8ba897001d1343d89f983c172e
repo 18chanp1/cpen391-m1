@@ -1,0 +1,390 @@
+/* 
+ * "Small Hello World" example. 
+ * 
+ * This example prints 'Hello from Nios II' to the STDOUT stream. It runs on
+ * the Nios II 'standard', 'full_featured', 'fast', and 'low_cost' example 
+ * designs. It requires a STDOUT  device in your system's hardware. 
+ *
+ * The purpose of this example is to demonstrate the smallest possible Hello 
+ * World application, using the Nios II HAL library.  The memory footprint
+ * of this hosted application is ~332 bytes by default using the standard 
+ * reference design.  For a more fully featured Hello World application
+ * example, see the example titled "Hello World".
+ *
+ * The memory footprint of this example has been reduced by making the
+ * following changes to the normal "Hello World" example.
+ * Check in the Nios II Software Developers Manual for a more complete 
+ * description.
+ * 
+ * In the SW Application project (small_hello_world):
+ *
+ *  - In the C/C++ Build page
+ * 
+ *    - Set the Optimization Level to -Os
+ * 
+ * In System Library project (small_hello_world_syslib):
+ *  - In the C/C++ Build page
+ * 
+ *    - Set the Optimization Level to -Os
+ * 
+ *    - Define the preprocessor option ALT_NO_INSTRUCTION_EMULATION 
+ *      This removes software exception handling, which means that you cannot 
+ *      run code compiled for Nios II cpu with a hardware multiplier on a core 
+ *      without a the multiply unit. Check the Nios II Software Developers 
+ *      Manual for more details.
+ *
+ *  - In the System Library page:
+ *    - Set Periodic system timer and Timestamp timer to none
+ *      This prevents the automatic inclusion of the timer driver.
+ *
+ *    - Set Max file descriptors to 4
+ *      This reduces the size of the file handle pool.
+ *
+ *    - Check Main function does not exit
+ *    - Uncheck Clean exit (flush buffers)
+ *      This removes the unneeded call to exit when main returns, since it
+ *      won't.
+ *
+ *    - Check Don't use C++
+ *      This builds without the C++ support code.
+ *
+ *    - Check Small C library
+ *      This uses a reduced functionality C library, which lacks  
+ *      support for buffering, file IO, floating point and getch(), etc. 
+ *      Check the Nios II Software Developers Manual for a complete list.
+ *
+ *    - Check Reduced device drivers
+ *      This uses reduced functionality drivers if they're available. For the
+ *      standard design this means you get polled UART and JTAG UART drivers,
+ *      no support for the LCD driver and you lose the ability to program 
+ *      CFI compliant flash devices.
+ *
+ *    - Check Access device drivers directly
+ *      This bypasses the device file system to access device drivers directly.
+ *      This eliminates the space required for the device file system services.
+ *      It also provides a HAL version of libc services that access the drivers
+ *      directly, further reducing space. Only a limited number of libc
+ *      functions are available in this configuration.
+ *
+ *    - Use ALT versions of stdio routines:
+ *
+ *           Function                  Description
+ *        ===============  =====================================
+ *        alt_printf       Only supports %s, %x, and %c ( < 1 Kbyte)
+ *        alt_putstr       Smaller overhead than puts with direct drivers
+ *                         Note this function doesn't add a newline.
+ *        alt_putchar      Smaller overhead than putchar with direct drivers
+ *        alt_getchar      Smaller overhead than getchar with direct drivers
+ *
+ */
+
+#include "sys/alt_stdio.h"
+#include "system.h"
+#include "altera_avalon_pio_regs.h"
+#include "stdio.h"
+#include "sys/alt_irq.h"
+#include "altera_avalon_timer_regs.h"
+#include "altera_avalon_timer.h"
+
+#define ONE 	0b1001111
+#define TWO 	0b0100100
+#define THREE 	0b0110000
+#define FOUR 	0b0011001
+#define FIVE 	0b0010010
+#define SIX 	0b0000010
+#define SEVEN 	0b1111000
+#define EIGHT 	0b0000000
+#define NINE 	0b0011000
+#define ZERO	0b1000000
+
+#define LED_ON 1023
+#define LED_OFF 0
+
+#define SEGS 3
+#define TIMER_PERIOD 4
+#define MODES 4
+#define MODE_LENGTH 200
+#define CYCLE_INTERVAL  MODE_LENGTH / TIMER_PERIOD
+#define DEFAULT_PERIOD 4000
+
+/**
+ * A function that converts a single digit to its corresponding
+ * representation on the 7 segment display and returns the encoding
+ * 
+ * input - digit to convert.
+*/
+int convert_to_7seg(int input);
+
+/**
+ * A helper function that displays number onto the lower 3 segment
+ * displays if lo is 1, and upper 3 segments if lo is 0.
+ * 
+ * number - number to display
+ * lo - lower 3 7seg or upper 3 7seg
+*/
+int display_7seg(int lo, int number);
+
+/**
+ * A function that displays a number on the 7-segment display.
+ * number - number to display
+*/
+void display_7seg_all(int number);
+
+/**
+ * reads the position of the switches on the DE1 to determine
+ * the multiplier for the light interval
+*/
+int read_timer_interval(void);
+
+/**
+ * Finds primes and displays them on the 7-segment displays
+*/
+void find_primes(void);
+
+/**
+ * An initializition routine to configure and enable interrupts
+*/
+void init_timer_interrupt(void);
+
+/*
+ * A function to change the timer's period / duration.
+ * 
+ * period - timer interrupt period in microseconds (or whatever the unit is).
+ *
+*/
+void set_timer_interrupt(int period);
+
+/**
+ * Interrupt handler for the timer.
+ * 
+*/
+static void timer_isr(void* context, alt_u32 id);
+
+int mode = 0;
+int up = 1;
+int interrupt_count = 0;
+int led_on = 1;
+int duty_cycle_state = 0;
+
+
+
+int main()
+{ 
+  alt_putstr("Hello from Nios II!\n");
+
+  init_timer_interrupt();
+
+  find_primes();
+
+
+  /* Event loop never exits. */
+  while (1);
+
+  return 0;
+}
+
+void init_timer_interrupt(void)
+{
+	//register ISR with HAL
+	alt_ic_isr_register(TIMER_0_IRQ_INTERRUPT_CONTROLLER_ID, TIMER_0_IRQ, (void*) timer_isr, NULL, 0x0);
+
+	//start the timer
+	IOWR_ALTERA_AVALON_TIMER_CONTROL(TIMER_0_BASE, ALTERA_AVALON_TIMER_CONTROL_CONT_MSK | 
+	ALTERA_AVALON_TIMER_CONTROL_START_MSK | 
+	ALTERA_AVALON_TIMER_CONTROL_ITO_MSK);
+
+	set_timer_interrupt(4000);
+}
+
+void set_timer_interrupt(int period)
+{
+	//idk how the conversion works tbh, i just read the value. 
+	period = period * 50 - 1;
+
+	IOWR_ALTERA_AVALON_TIMER_PERIODL(TIMER_0_BASE, period & 0xFFFF);
+	IOWR_ALTERA_AVALON_TIMER_PERIODH(TIMER_0_BASE, period >> 16);
+}
+
+static void timer_isr(void * context, alt_u32 id)
+{
+	//clear interrupt
+	IOWR_ALTERA_AVALON_TIMER_STATUS(TIMER_0_BASE, 0);
+
+
+	//first read the timer settings
+	int interrupts_per_mode = CYCLE_INTERVAL * read_timer_interval();
+
+	//switch brightness if interrupts exceeded
+	if(interrupt_count > interrupts_per_mode)
+	{
+
+		interrupt_count = 0;
+		//go back up in brightness if dim
+		if(mode == 4) up = 0;
+
+		//go back down in brightness if bright
+		if(mode == 0) up = 1;
+
+		//move to next brightness state
+		if(up) mode++;
+		else mode--;
+	}
+
+	//duty cycle logic
+	int threshold = mode;
+
+
+	if(duty_cycle_state > MODES)
+	{
+		duty_cycle_state = 0;
+	}
+
+
+	if(duty_cycle_state < threshold)
+	{
+		IOWR_ALTERA_AVALON_PIO_DATA(LEDR_BASE, LED_OFF);
+	} else
+	{
+		IOWR_ALTERA_AVALON_PIO_DATA(LEDR_BASE, LED_ON);
+
+	}
+
+
+
+	duty_cycle_state++;
+	interrupt_count++;
+
+	//do something
+
+}
+
+
+//change to save primes
+void find_primes(void){
+	int curr = 3;
+	int prime_list[200];
+	prime_list[0] = 2;
+	int top = 1;
+
+	while(1){
+		int prime = 1;
+
+		for(int i = 0; prime_list[i] * prime_list[i] <= curr && i < top; i++){
+			if(curr % prime_list[i] == 0){
+				curr++;
+				prime = 0;
+				break;
+			}
+		}
+		if(prime)
+		{
+			display_7seg_all(curr);
+			prime_list[top] = curr;
+			printf("prime %i \n", curr);
+			top++;
+			curr+=2;
+		}
+
+		if (curr < 0)
+		{
+			curr = 2;
+		}
+
+	}
+}
+
+void display_7seg_all(int number)
+{
+	display_7seg(1, number % 1000);
+	display_7seg(0, number / 1000);
+}
+
+int read_timer_interval(void)
+{
+	int switches = IORD_ALTERA_AVALON_PIO_DATA(SWITCH_BASE);
+
+	return switches;
+}
+
+int display_7seg(int lo, int number)
+{
+	if (lo)
+	{
+		int digit[3];
+		digit[0] = ZERO;
+		digit[1] = ZERO;
+		digit[2] = ZERO;
+		int ctr = 0;
+		int seg_num = 0;
+
+		while(number > 0)
+		{
+			digit[ctr] = convert_to_7seg(number % 10);
+			number /= 10;
+			ctr++;
+		}
+
+		for (int i = 0; i < SEGS; i++){
+			seg_num += digit[i] << (7 * i);
+		}
+
+		IOWR_ALTERA_AVALON_PIO_DATA(SEG_LO_BASE, seg_num);
+
+		return 1;
+	} else
+	{
+		int digit[3];
+		digit[0] = ZERO;
+		digit[1] = ZERO;
+		digit[2] = ZERO;
+		int ctr = 0;
+		int seg_num = 0;
+
+		while(number > 0)
+		{
+			digit[ctr] = convert_to_7seg(number % 10);
+			number /= 10;
+			ctr++;
+		}
+
+		for (int i = 0; i < SEGS; i++){
+			seg_num += digit[i] << (7 * i);
+		}
+
+		IOWR_ALTERA_AVALON_PIO_DATA(SEG_HI_BASE, seg_num);
+
+		return 1;
+	}
+
+
+
+}
+
+int convert_to_7seg(int input)
+{
+	switch(input)
+	{
+	case 0:
+		return ZERO;
+	case 1:
+		return ONE;
+	case 2:
+		return TWO;
+	case 3:
+		return THREE;
+	case 4:
+		return FOUR;
+	case 5:
+		return FIVE;
+	case 6:
+		return SIX;
+	case 7:
+		return SEVEN;
+	case 8:
+		return EIGHT;
+	case 9:
+		return NINE;
+	default:
+		return -1;
+	}
+}
